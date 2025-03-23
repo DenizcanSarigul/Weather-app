@@ -1,0 +1,247 @@
+from m5stack import *
+from m5stack_ui import *
+from uiflow import *
+import urequests
+import unit
+import machine
+import time
+import ntptime
+import hashlib
+import binascii
+import wifiCfg
+
+wifi_networks = [('iot-unil', 'password1'), ('Network2', 'password2'), ('Network3', 'password3')]
+
+for network, password in wifi_networks:
+    wifiCfg.doConnect(network, password)
+    for _ in range(10):  # Retry up to 10 times
+        if wifiCfg.wlan_sta.isconnected():
+            break
+        wait_ms(1000)
+    if wifiCfg.wlan_sta.isconnected():
+        break
+
+
+screen = M5Screen()
+screen.clean_screen()
+screen.set_screen_bg_color(0xFFFFFF)
+
+# Sensors
+env3_0 = unit.get(unit.ENV3, unit.PORTA)  # Humidity sensor
+pir_0 = unit.get(unit.PIR, unit.PORTB)    # Motion sensor
+tvoc_1 = unit.get(unit.TVOC, unit.PORTC)  # Air quality sensor
+
+# Service URL
+url = "https://weatherapp-backend-ci-cj6e7buidq-oa.a.run.app"
+passwd = "..."#Password
+h = hashlib.sha256(passwd.encode('utf-8'))
+passwd_hash = binascii.hexlify(h.digest())
+
+# Page state variable
+current_page = "main"
+
+# Timing variables
+temp_flag = 600
+last_co2_alarm_time = 600
+last_humidity_alarm_time = 600
+last_announcement_time = 3600
+last_download_time = 900
+ntp = ntptime.client(host='ch.pool.ntp.org', timezone=2)  # Time in Switzerland
+
+# Labels for main page
+value_temp, value_humid, value_co2, time_label, date = None, None, None, None, None
+
+# Functions
+
+# Download image from service
+def download_image(endpoint, filename):
+    image_url = url + endpoint
+    try:
+        response = urequests.get(image_url)
+        if response.status_code == 200:
+            with open(filename, 'wb') as f:
+                f.write(response.content)
+        else:
+            raise Exception("Download fail: {}".format(response.status_code))
+    except Exception as e:
+        lcd.clear()
+        lcd.print("Download error: " + str(e), lcd.CENTER, 50)
+    finally:
+        response.close()
+
+# Display image
+def show_image(image_path):
+    try:
+        screen.clean_screen()
+        image = M5Img(image_path, x=0, y=0, parent=None)
+    except OSError as e:
+        lcd.clear()
+        lcd.print("Image display error " + str(e), lcd.CENTER, 50)
+    except Exception as e:
+        lcd.clear()
+        lcd.print("Unexpected error " + str(e), lcd.CENTER, 50)
+
+# Display main page
+def main_page():
+    screen.clean_screen()
+    show_image("/flash/indoor.png")
+    screen.set_screen_bg_color(0x000000)
+    
+    global value_temp, value_humid, value_co2, time_label, date
+    
+    time_label = M5Label("", x=250, y=10, color=0xf6f6f6, font=FONT_MONT_22, parent=None)
+    date = M5Label("", x=10, y=10, color=0xf6f6f6, font=FONT_MONT_22, parent=None)
+    
+    M5Label('Indoor Values', x=80, y=60, color=0xf6f6f6, font=FONT_MONT_22, parent=None)
+    
+    value_temp = M5Label('', x=160, y=100, color=0xf6f6f6, font=FONT_MONT_22, parent=None)
+    value_humid = M5Label('', x=160, y=140, color=0xf6f6f6, font=FONT_MONT_22, parent=None)
+    value_co2 = M5Label('', x=160, y=180, color=0xf6f6f6, font=FONT_MONT_22, parent=None)
+
+# Text to speech
+def get_text_to_speech(text):
+    try:
+        encoded_text = url_encode(text)
+        response = urequests.get(url + "/get_text_to_speech_google?text=" + encoded_text)
+        if response.status_code == 200:
+            file_path = '/flash/res/output.wav'
+            with open(file_path, 'wb') as f:
+                f.write(response.content)
+            speaker.playWAV(file_path, volume=6)
+        else:
+            raise Exception("Download fail: {}".format(response.status_code))
+    except Exception as e:
+        lcd.clear()
+        lcd.print("Download error: " + str(e), lcd.CENTER, 50)
+    finally:
+        response.close()
+
+# URL encoding function
+def url_encode(text):
+    return text.replace(" ", "%20").replace("!", "%21").replace("#", "%23").replace("$", "%24").replace("&", "%26").replace("'", "%27").replace("(", "%28").replace(")", "%29").replace("*", "%2A").replace("+", "%2B").replace(",", "%2C").replace("/", "%2F").replace(":", "%3A").replace(";", "%3B").replace("=", "%3D").replace("?", "%3F").replace("@", "%40").replace("[", "%5B").replace("]", "%5D")
+
+# Weather advice
+def get_weather_advice():
+    try:
+        response = urequests.get(url + "/get_weather_advice")
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception("Download fail: {}".format(response.status_code))
+    except Exception as e:
+        lcd.clear()
+        lcd.print("Download error: " + str(e), lcd.CENTER, 50)
+    finally:
+        response.close()
+
+# Button press handlers
+def btnA_wasPressed():
+    global current_page
+    current_page = "main"
+    main_page()
+
+def btnB_wasPressed():
+    global current_page
+    current_page = "weather"
+    screen.clean_screen()
+    show_image("/flash/weather.png")
+
+def btnC_wasPressed():
+    global current_page
+    current_page = "forecast"
+    screen.clean_screen()
+    show_image("/flash/forecast.png")
+
+# Attach button press handlers
+btnA.wasPressed(btnA_wasPressed)
+btnB.wasPressed(btnB_wasPressed)
+btnC.wasPressed(btnC_wasPressed)
+
+start = True
+
+# Main loop
+main_page()
+
+while True:
+    try:
+        # Current time counters
+        current_time_format = ntp.formatTime(':')[:5]
+        
+        if start:
+            download_image("/image/indoor", "/flash/indoor.png")
+            start = False
+        
+        if current_page == "main":
+            if value_temp and value_humid and value_co2:
+                value_temp.set_text(str(round(env3_0.temperature)) + ' °C')
+                value_humid.set_text(str(round(env3_0.humidity)) + " %")
+                value_co2.set_text(str(round(tvoc_1.eCO2)) + " ppm")
+                date.set_text(ntp.formatDate('-'))
+                time_label.set_text(current_time_format)
+
+        # Download images every 15 minutes
+        if last_download_time >= 900:
+            download_image("/image/current_weather", "/flash/weather.png")
+            download_image("/image/weather_forecast", "/flash/forecast.png")
+            last_download_time = 0
+
+        # Weather announcement every hour and if motion is detected
+        if pir_0.state == 1 and last_announcement_time >= 3600:
+            weatherAdvice = get_weather_advice()
+            get_text_to_speech(weatherAdvice)
+            last_announcement_time = 0
+
+        # Humidity alert
+        if env3_0.humidity < 40 and last_humidity_alarm_time >= 600:
+            rgb.setColorAll(0xff0000)
+            power.setVibrationEnable(True)
+            time.sleep(1)
+            power.setVibrationEnable(False)
+            rgb.setColorAll(0x000000)
+            get_text_to_speech("Warning, humidity levels below 40 percent")
+            last_humidity_alarm_time = 0
+
+        # CO2 alerts
+        if tvoc_1.eCO2 > 1000 and last_co2_alarm_time >= 600:
+            rgb.setColorAll(0xff0000)
+            power.setVibrationEnable(True)
+            time.sleep(1)
+            power.setVibrationEnable(False)
+            rgb.setColorAll(0x000000)
+            get_text_to_speech("Warning, air quality is getting poor")
+            last_co2_alarm_time = 0
+            
+        if tvoc_1.eCO2 > 2000 and last_co2_alarm_time >= 600:
+            rgb.setColorAll(0xff0000)
+            power.setVibrationEnable(True)
+            time.sleep(1)
+            power.setVibrationEnable(False)
+            rgb.setColorAll(0x000000)
+            get_text_to_speech("Warning, air quality is critical")
+            last_co2_alarm_time = 0
+
+        # Send indoor and outdoor weather values to BigQuery every 10 min
+        if temp_flag >= 600:
+            data = {
+                "passwd": passwd_hash,
+                "values": {
+                    "indoor_temp": round(env3_0.temperature),
+                    "indoor_humidity": round(env3_0.humidity),
+                    "co2": round(tvoc_1.eCO2)
+                }
+            }
+            urequests.post(url + "/send-to-bigquery", json=data)
+            temp_flag = 0
+
+        temp_flag += 1
+        last_co2_alarm_time += 1
+        last_humidity_alarm_time += 1
+        last_announcement_time += 1
+        last_download_time += 1
+        
+        wait_ms(200)  # Reduced delay for faster updates, whole loop takes about 1 seocndes with wait_ms()
+        
+    except Exception as e:
+        lcd.clear()
+        lcd.print("Error: " + str(e), lcd.CENTER, 50)
+        time.sleep(1)  # Wait for 1 seconds before resuming

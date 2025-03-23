@@ -1,0 +1,10 @@
+google-cloud-bigquery
+google-cloud-texttospeech
+db-dtypes
+Flask
+requests
+openai
+PyYAML
+pandas
+numpy
+pillow
